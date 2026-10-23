@@ -339,41 +339,174 @@ function orderQuad(q) {
   let s = 0; for (let i = 1; i < 4; i++) if (q[i][0] + q[i][1] < q[s][0] + q[s][1]) s = i;
   return [0, 1, 2, 3].map(k => q[(s + k) % 4]);
 }
+function detectCanvas(src, W0, H0) { const r = detectFull(src, W0, H0); return r ? r.quad : null; }
+
+/* ---- Detección precisa v2: tres candidatos, puntaje por bordes y ajuste fino ---- */
+function grayOf(d, n) { const g = new Float32Array(n); for (let i = 0, j = 0; i < n; i++, j += 4) g[i] = 0.299 * d[j] + 0.587 * d[j + 1] + 0.114 * d[j + 2]; return g; }
+function otsuF(v, n, lo, hi) {
+  const B = 256, hist = new Float64Array(B), k = (B - 1) / Math.max(1e-6, hi - lo);
+  for (let i = 0; i < n; i++) hist[clamp(((v[i] - lo) * k) | 0, 0, B - 1)]++;
+  let sum = 0; for (let t = 0; t < B; t++) sum += t * hist[t];
+  let sB = 0, wB = 0, best = -1, th = 128;
+  for (let t = 0; t < B; t++) { wB += hist[t]; if (!wB) continue; const wF = n - wB; if (!wF) break; sB += t * hist[t]; const m = wB * wF * (sB / wB - (sum - sB) / wF) ** 2; if (m > best) { best = m; th = t; } }
+  return lo + th / k;
+}
+function pctF(v, n, p) { let mx = 0; for (let i = 0; i < n; i++) if (v[i] > mx) mx = v[i]; const B = 1024, h = new Uint32Array(B), k = (B - 1) / (mx || 1); for (let i = 0; i < n; i++) h[(v[i] * k) | 0]++; let a = 0; for (let t = 0; t < B; t++) { a += h[t]; if (a >= n * p) return t / k; } return mx; }
+function sobelMag(g, w, h) {
+  const m = new Float32Array(w * h);
+  for (let y = 1; y < h - 1; y++) for (let x = 1, i = y * w + 1; x < w - 1; x++, i++) {
+    const gx = g[i - w + 1] + 2 * g[i + 1] + g[i + w + 1] - g[i - w - 1] - 2 * g[i - 1] - g[i + w - 1];
+    const gy = g[i + w - 1] + 2 * g[i + w] + g[i + w + 1] - g[i - w - 1] - 2 * g[i - w] - g[i - w + 1];
+    m[i] = Math.sqrt(gx * gx + gy * gy);
+  }
+  return m;
+}
+function compQuad(m, w, h) {
+  const N = w * h;
+  m = morph(m, w, h, 0); m = morph(m, w, h, 0); m = morph(m, w, h, 1); m = morph(m, w, h, 1);
+  const lab = new Int32Array(N), st = new Int32Array(N); let cur = 0, bl = 0, ba = 0;
+  for (let i = 0; i < N; i++) if (m[i] && !lab[i]) {
+    cur++; let sp = 0, a = 0; st[sp++] = i; lab[i] = cur;
+    while (sp) { const p = st[--sp]; a++; const px = p % w;
+      if (px > 0 && m[p - 1] && !lab[p - 1]) { lab[p - 1] = cur; st[sp++] = p - 1; }
+      if (px < w - 1 && m[p + 1] && !lab[p + 1]) { lab[p + 1] = cur; st[sp++] = p + 1; }
+      if (p >= w && m[p - w] && !lab[p - w]) { lab[p - w] = cur; st[sp++] = p - w; }
+      if (p < N - w && m[p + w] && !lab[p + w]) { lab[p + w] = cur; st[sp++] = p + w; } }
+    if (a > ba) { ba = a; bl = cur; }
+  }
+  if (ba < N * 0.08) return null;
+  const pts = [];
+  for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) { const i = y * w + x; if (lab[i] !== bl) continue;
+    if (!x || !y || x === w - 1 || y === h - 1 || lab[i - 1] !== bl || lab[i + 1] !== bl || lab[i - w] !== bl || lab[i + w] !== bl) pts.push([x + 0.5, y + 0.5]); }
+  const H = hull(pts); if (H.length < 4) return null;
+  return orderQuad(maxQuad(H));
+}
+function quadScore(q, g, w, h) {
+  const A = Math.abs(shoelace(q)) / (w * h); if (A < 0.1) return -1;
+  let sgn = 0;
+  for (let i = 0; i < 4; i++) {
+    const a = q[(i + 3) % 4], b = q[i], c = q[(i + 1) % 4], v1x = a[0] - b[0], v1y = a[1] - b[1], v2x = c[0] - b[0], v2y = c[1] - b[1];
+    const l1 = Math.hypot(v1x, v1y), l2 = Math.hypot(v2x, v2y); if (l1 < 8 || l2 < 8) return -1;
+    const ang = Math.acos(clamp((v1x * v2x + v1y * v2y) / (l1 * l2), -1, 1)) * 180 / Math.PI; if (ang < 45 || ang > 135) return -1;
+    const cr = Math.sign(v1x * v2y - v1y * v2x); if (sgn && cr !== sgn) return -1; sgn = cr;
+  }
+  /* Un lado real de la hoja tiene, justo adentro, un margen de papel parejo y, justo afuera, un salto de color constante */
+  const cx = q.reduce((s, p) => s + p[0], 0) / 4, cy = q.reduce((s, p) => s + p[1], 0) / 4, diag = Math.hypot(w, h), med = a => { a.sort((x, y) => x - y); return a[a.length >> 1]; };
+  let tot = 0;
+  for (let i = 0; i < 4; i++) {
+    const a = q[i], b = q[(i + 1) % 4], dx = b[0] - a[0], dy = b[1] - a[1], L = Math.hypot(dx, dy); let nx = -dy / L, ny = dx / L;
+    const mx = (a[0] + b[0]) / 2, my = (a[1] + b[1]) / 2; if ((cx - mx) * nx + (cy - my) * ny < 0) { nx = -nx; ny = -ny; }
+    let qs = 0;
+    for (const dep of [0.007, 0.014]) {
+      const D = Math.max(2.5, diag * dep), IN = [], OUT = [];
+      for (let t = 0.08; t < 0.93; t += 0.035) { const px = a[0] + dx * t, py = a[1] + dy * t; IN.push(bil(g, w, h, px + nx * D, py + ny * D)); const ox = px - nx * D, oy = py - ny * D; if (ox >= 0 && oy >= 0 && ox < w && oy < h) OUT.push(bil(g, w, h, ox, oy)); }
+      const mi = med(IN.slice()), madIn = med(IN.map(v => Math.abs(v - mi)));
+      if (OUT.length < IN.length * 0.5) { qs += 0.35; continue; } /* lado pegado al borde de la foto */
+      const mo = med(OUT.slice()), c = Math.abs(mi - mo);
+      let agree = 0; const sgnc = Math.sign(mi - mo); for (let k = 0; k < Math.min(IN.length, OUT.length); k++) if (Math.sign(IN[k] - OUT[k]) === sgnc && Math.abs(IN[k] - OUT[k]) > 4) agree++;
+      qs += (c / (c + 3 * madIn + 6)) * (agree / Math.min(IN.length, OUT.length));
+    }
+    tot += qs / 2;
+  }
+  let sc = (tot / 4) * (0.5 + 0.5 * Math.min(1, A / 0.4));
+  if (A > 0.93) sc *= 0.55;
+  return sc;
+}
 function detectSmall(d, w, h) {
   try {
-    const N = w * h; let g = new Float32Array(N);
-    for (let i = 0, j = 0; i < N; i++, j += 4) { const r = d[j], G = d[j + 1], B = d[j + 2]; g[i] = 0.299 * r + 0.587 * G + 0.114 * B - 0.7 * (Math.max(r, G, B) - Math.min(r, G, B)); }
-    g = blurF(g, w, h, 2);
-    const hist = new Float64Array(256); for (let i = 0; i < N; i++) hist[clamp(g[i] | 0, 0, 255)]++;
-    let sum = 0; for (let t = 0; t < 256; t++) sum += t * hist[t];
-    let sB = 0, wB = 0, best = -1, th = 128;
-    for (let t = 0; t < 256; t++) { wB += hist[t]; if (!wB) continue; const wF = N - wB; if (!wF) break; sB += t * hist[t]; const v = wB * wF * (sB / wB - (sum - sB) / wF) ** 2; if (v > best) { best = v; th = t; } }
-    let m = new Uint8Array(N); for (let i = 0; i < N; i++) m[i] = g[i] > th ? 1 : 0;
-    m = morph(m, w, h, 0); m = morph(m, w, h, 0); m = morph(m, w, h, 1); m = morph(m, w, h, 1);
-    const lab = new Int32Array(N), st = new Int32Array(N); let cur = 0, bl = 0, ba = 0;
-    for (let i = 0; i < N; i++) if (m[i] && !lab[i]) {
-      cur++; let sp = 0, a = 0; st[sp++] = i; lab[i] = cur;
-      while (sp) { const p = st[--sp]; a++; const px = p % w;
-        if (px > 0 && m[p - 1] && !lab[p - 1]) { lab[p - 1] = cur; st[sp++] = p - 1; }
-        if (px < w - 1 && m[p + 1] && !lab[p + 1]) { lab[p + 1] = cur; st[sp++] = p + 1; }
-        if (p >= w && m[p - w] && !lab[p - w]) { lab[p - w] = cur; st[sp++] = p - w; }
-        if (p < N - w && m[p + w] && !lab[p + w]) { lab[p + w] = cur; st[sp++] = p + w; } }
-      if (a > ba) { ba = a; bl = cur; }
-    }
-    if (ba < N * 0.1) return null;
-    const pts = [];
-    for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) { const i = y * w + x; if (lab[i] !== bl) continue;
-      if (!x || !y || x === w - 1 || y === h - 1 || lab[i - 1] !== bl || lab[i + 1] !== bl || lab[i - w] !== bl || lab[i + w] !== bl) pts.push([x, y]); }
-    const H = hull(pts); if (H.length < 4) return null;
-    const q = maxQuad(H); if (Math.abs(shoelace(q)) < N * 0.1) return null;
-    return orderQuad(q).map(([X, Y]) => [X + 0.5, Y + 0.5]);
+    const N = w * h, g0 = grayOf(d, N), g = blurF(g0, w, h, 1), mag = sobelMag(g, w, h), ref = Math.max(20, pctF(mag, N, 0.97));
+    const cands = [];
+    /* A: hoja clara contra fondo (brillo menos saturación) */
+    { const v = new Float32Array(N); for (let i = 0, j = 0; i < N; i++, j += 4) { const r = d[j], G = d[j + 1], B = d[j + 2]; v[i] = g0[i] - 0.7 * (Math.max(r, G, B) - Math.min(r, G, B)); }
+      const vb = blurF(v, w, h, 2), th = otsuF(vb, N, -180, 255), m = new Uint8Array(N); for (let i = 0; i < N; i++) m[i] = vb[i] > th ? 1 : 0; cands.push(compQuad(m, w, h)); }
+    /* B: diferencia con el color del fondo (tomado del borde de la foto) */
+    { const rs = [], gs = [], bs = [], add = i => { rs.push(d[i * 4]); gs.push(d[i * 4 + 1]); bs.push(d[i * 4 + 2]); };
+      for (let x = 0; x < w; x += 2) for (let k = 0; k < 3; k++) { add(k * w + x); add((h - 1 - k) * w + x); }
+      for (let y = 0; y < h; y += 2) for (let k = 0; k < 3; k++) { add(y * w + k); add(y * w + w - 1 - k); }
+      const med = a => { a.sort((p, q) => p - q); return a[a.length >> 1]; }, R0 = med(rs), G0 = med(gs), B0 = med(bs);
+      const v = new Float32Array(N); for (let i = 0, j = 0; i < N; i++, j += 4) v[i] = Math.hypot(d[j] - R0, d[j + 1] - G0, d[j + 2] - B0);
+      const vb = blurF(v, w, h, 2), th = Math.max(14, otsuF(vb, N, 0, 442)), m = new Uint8Array(N); for (let i = 0; i < N; i++) m[i] = vb[i] > th ? 1 : 0; cands.push(compQuad(m, w, h));
+      /* B2: solo el tono (ignora luz y sombras): hoja de color sobre mesa gris, o al revés */
+      const cr0 = R0 - G0, cb0 = B0 - G0, v2 = new Float32Array(N); for (let i = 0, j = 0; i < N; i++, j += 4) v2[i] = Math.hypot(d[j] - d[j + 1] - cr0, d[j + 2] - d[j + 1] - cb0);
+      const vb2 = blurF(v2, w, h, 3), th2 = Math.max(8, otsuF(vb2, N, 0, 300)), m2 = new Uint8Array(N); for (let i = 0; i < N; i++) m2[i] = vb2[i] > th2 ? 1 : 0; cands.push(compQuad(m2, w, h)); }
+    /* C: zona encerrada por bordes (sirve para hoja blanca sobre mesa clara); se prueba con dos umbrales */
+    for (const pq of [0.7, 0.86]) { const th = Math.max(10, pctF(mag, N, pq)); let e = new Uint8Array(N); for (let i = 0; i < N; i++) e[i] = mag[i] > th ? 1 : 0;
+      e = morph(e, w, h, 1); e = morph(e, w, h, 1);
+      const out = new Uint8Array(N), st = new Int32Array(N); let sp = 0; const push = i => { if (!e[i] && !out[i]) { out[i] = 1; st[sp++] = i; } };
+      for (let x = 0; x < w; x++) { push(x); push((h - 1) * w + x); } for (let y = 0; y < h; y++) { push(y * w); push(y * w + w - 1); }
+      while (sp) { const p = st[--sp], px = p % w; if (px > 0) push(p - 1); if (px < w - 1) push(p + 1); if (p >= w) push(p - w); if (p < N - w) push(p + w); }
+      const m = new Uint8Array(N); for (let i = 0; i < N; i++) m[i] = out[i] ? 0 : 1; cands.push(compQuad(m, w, h)); }
+    let best = null, bs = 0.34;
+    for (const q of cands) if (q) { const s = quadScore(q, g, w, h); if (s > bs) { bs = s; best = q; } }
+    return best;
   } catch (e) { return null; }
 }
-function detectCanvas(src, W0, H0) {
-  const sc = Math.min(1, 320 / Math.max(W0, H0)), w = Math.max(8, Math.round(W0 * sc)), h = Math.max(8, Math.round(H0 * sc));
-  const c = mk(w, h), x = ctx(c, true); x.drawImage(src, 0, 0, w, h);
-  const q = detectSmall(x.getImageData(0, 0, w, h).data, w, h);
-  return q ? q.map(([X, Y]) => [clamp(X / sc, 0, W0), clamp(Y / sc, 0, H0)]) : null;
+/* Ajuste fino: busca el borde real a lo largo de cada lado y ajusta una recta robusta */
+function bil(G, w, h, x, y) { if (x < 0) x = 0; else if (x > w - 1.001) x = w - 1.001; if (y < 0) y = 0; else if (y > h - 1.001) y = h - 1.001; const x0 = x | 0, y0 = y | 0, fx = x - x0, fy = y - y0, i = y0 * w + x0; return (G[i] * (1 - fx) + G[i + 1] * fx) * (1 - fy) + (G[i + w] * (1 - fx) + G[i + w + 1] * fx) * fy; }
+function fitLine(P) {
+  let use = P;
+  for (let it = 0; it < 3; it++) {
+    let sw = 0, mx = 0, my = 0; for (const p of use) { sw += p[2]; mx += p[0] * p[2]; my += p[1] * p[2]; } mx /= sw; my /= sw;
+    let sxx = 0, syy = 0, sxy = 0; for (const p of use) { const dx = p[0] - mx, dy = p[1] - my; sxx += dx * dx * p[2]; syy += dy * dy * p[2]; sxy += dx * dy * p[2]; }
+    const th = 0.5 * Math.atan2(2 * sxy, sxx - syy), ux = Math.cos(th), uy = Math.sin(th), L = { x: mx, y: my, ux, uy };
+    if (it === 2) return L;
+    const res = use.map(p => Math.abs((p[0] - mx) * -uy + (p[1] - my) * ux)), sorted = res.slice().sort((a, b) => a - b), md = sorted[sorted.length >> 1];
+    const keep = use.filter((p, k) => res[k] <= Math.max(1.2, md * 2.5)); if (keep.length < 5) return L; use = keep;
+  }
+}
+function meet(a, b) { const det = a.ux * b.uy - a.uy * b.ux; if (Math.abs(det) < 1e-6) return null; const t = ((b.x - a.x) * b.uy - (b.y - a.y) * b.ux) / det; return [a.x + a.ux * t, a.y + a.uy * t]; }
+function refineQuad(G, w, h, q) {
+  const diag = Math.hypot(w, h), R = Math.max(5, diag * 0.018), lines = [];
+  for (let i = 0; i < 4; i++) {
+    const a = q[i], b = q[(i + 1) % 4], dx = b[0] - a[0], dy = b[1] - a[1], L = Math.hypot(dx, dy), tx = dx / L, ty = dy / L, nx = -ty, ny = tx, P = [];
+    for (let k = 3; k <= 47; k++) { const t = k / 50, px = a[0] + dx * t, py = a[1] + dy * t; let best = 0, bsft = 0;
+      for (let s = -R; s <= R; s += 0.5) { const x = px + nx * s, y = py + ny * s; if (x < 2 || y < 2 || x > w - 3 || y > h - 3) continue;
+        let d = 0; for (const o of [-1.5, 0, 1.5]) d += bil(G, w, h, x + nx * 1.5 + tx * o, y + ny * 1.5 + ty * o) - bil(G, w, h, x - nx * 1.5 + tx * o, y - ny * 1.5 + ty * o);
+        d = Math.abs(d) / 3 * (1 - 0.35 * Math.abs(s) / R); if (d > best) { best = d; bsft = s; } }
+      if (best > 6) P.push([px + nx * bsft, py + ny * bsft, best]); }
+    lines.push(P.length >= 8 ? fitLine(P) : { x: a[0], y: a[1], ux: tx, uy: ty });
+  }
+  const out = [];
+  for (let i = 0; i < 4; i++) { const p = meet(lines[(i + 3) % 4], lines[i]); out.push(p && Math.hypot(p[0] - q[i][0], p[1] - q[i][1]) < diag * 0.045 ? p : q[i]); }
+  return out;
+}
+/* Si no se ven los bordes: endereza con la inclinación de las líneas de texto */
+function deskewQuad(d, w, h) {
+  const N = w * h, g = grayOf(d, N), th = otsuF(g, N, 0, 255) - 12, P = [];
+  for (let y = 2; y < h - 2; y++) for (let x = 2; x < w - 2; x++) if (g[y * w + x] < th) P.push(x - w / 2, y - h / 2);
+  const n = P.length / 2; if (n < N * 0.004 || n > N * 0.45) return null;
+  const step = Math.max(1, Math.floor(n / 25000));
+  const score = deg => { const t = deg * Math.PI / 180, s = Math.sin(t), c = Math.cos(t), off = Math.hypot(w, h), hist = new Float64Array(Math.ceil(off * 2) + 2); for (let k = 0; k < n; k += step) { const y = -P[2 * k] * s + P[2 * k + 1] * c + off; hist[y | 0]++; } let q = 0; for (const v of hist) q += v * v; return q; };
+  let best = 0, bv = score(0); const base = bv;
+  for (let a = -15; a <= 15.01; a += 0.5) { const v = score(a); if (v > bv) { bv = v; best = a; } }
+  for (let a = best - 0.5; a <= best + 0.5; a += 0.1) { const v = score(a); if (v > bv) { bv = v; best = a; } }
+  if (Math.abs(best) < 0.6 || bv / base < 1.08) return null;
+  const t = best * Math.PI / 180, sA = Math.abs(Math.sin(t)), cA = Math.abs(Math.cos(t)), long = Math.max(w, h), short = Math.min(w, h), wl = w >= h;
+  let wr, hr;
+  if (short <= 2 * sA * cA * long) { const x = 0.5 * short; [wr, hr] = wl ? [x / sA, x / cA] : [x / cA, x / sA]; } else { const c2 = cA * cA - sA * sA; wr = (w * cA - h * sA) / c2; hr = (h * cA - w * sA) / c2; }
+  wr *= 0.995; hr *= 0.995;
+  const cx = w / 2, cy = h / 2, R = (x, y) => [cx + x * Math.cos(t) - y * Math.sin(t), cy + x * Math.sin(t) + y * Math.cos(t)];
+  return [R(-wr / 2, -hr / 2), R(wr / 2, -hr / 2), R(wr / 2, hr / 2), R(-wr / 2, hr / 2)];
+}
+function detectFull(src, W0, H0) {
+  const sc = Math.min(1, 400 / Math.max(W0, H0)), w = Math.max(8, Math.round(W0 * sc)), h = Math.max(8, Math.round(H0 * sc));
+  const c = mk(w, h), x = ctx(c, true); x.imageSmoothingQuality = "high"; x.drawImage(src, 0, 0, w, h);
+  const d = x.getImageData(0, 0, w, h).data, q = detectSmall(d, w, h);
+  if (q) {
+    const ms = Math.min(1, 1400 / Math.max(W0, H0)), mw = Math.round(W0 * ms), mh = Math.round(H0 * ms), mc = mk(mw, mh), mx = ctx(mc, true);
+    mx.imageSmoothingQuality = "high"; mx.drawImage(src, 0, 0, mw, mh);
+    const G = blurF(grayOf(mx.getImageData(0, 0, mw, mh).data, mw * mh), mw, mh, 1);
+    let r = refineQuad(G, mw, mh, q.map(([X, Y]) => [X / sc * ms, Y / sc * ms]));
+    r = refineQuad(G, mw, mh, r);
+    /* recorte de seguridad: 0.25 % hacia adentro para no dejar franjas de fondo */
+    const cxm = r.reduce((s, p) => s + p[0], 0) / 4, cym = r.reduce((s, p) => s + p[1], 0) / 4, inset = Math.hypot(mw, mh) * 0.0025;
+    r = r.map(([X, Y]) => { const dx = cxm - X, dy = cym - Y, L = Math.hypot(dx, dy) || 1; return [X + dx / L * inset, Y + dy / L * inset]; });
+    return { quad: r.map(([X, Y]) => [clamp(X / ms, 0, W0), clamp(Y / ms, 0, H0)]), mode: "doc" };
+  }
+  const ds = Math.min(1, 700 / Math.max(W0, H0)), dw = Math.round(W0 * ds), dh = Math.round(H0 * ds), dc = mk(dw, dh), dx = ctx(dc, true); dx.drawImage(src, 0, 0, dw, dh);
+  const k = deskewQuad(dx.getImageData(0, 0, dw, dh).data, dw, dh);
+  if (k) return { quad: k.map(([X, Y]) => [X / ds, Y / ds]), mode: "deskew" };
+  return null;
 }
 
 /* ---- Perspectiva ---- */
@@ -515,9 +648,9 @@ async function ingest(a) {
   const c = mk(w, h), x = ctx(c); x.imageSmoothingEnabled = true; x.imageSmoothingQuality = "high"; x.drawImage(b, 0, 0, w, h);
   if (b !== a.src || !IN_DOC) free(b);
   const blob = await encode(c, a.jq);
-  const quad = detectCanvas(c, w, h) || [[0, 0], [w, 0], [w, h], [0, h]];
+  const det = detectFull(c, w, h), quad = det ? det.quad : [[0, 0], [w, 0], [w, h], [0, h]];
   put(a.id, { cv: c, w, h, full: null, lv: new Map(), warp: null });
-  return { blob, w, h, quad };
+  return { blob, w, h, quad, mode: det ? det.mode : "none" };
 }
 async function handle(op, a) {
   switch (op) {
@@ -535,7 +668,7 @@ if (!IN_DOC) self.onmessage = async ev => {
   try { const r = await handle(op, a); self.postMessage({ id, ok: true, r }, r && r.bitmap ? [r.bitmap] : []); }
   catch (err) { self.postMessage({ id, ok: false, err: String(err && err.message || err) }); }
 };
-return { handle, orderQuad, shoelace };
+return { handle, orderQuad, shoelace, _detectFull: (c, w, h) => detectFull(c, w, h) };
 })();
 </script>
 
@@ -561,7 +694,7 @@ const QCAP = {
   maxima: { side: 4800, jq: 0.95, label: "Máxima", short: "Máx", desc: "Resolución completa de la cámara (hasta 17 MP)" }
 };
 const QEXP = { liviana: [1400, 0.72], normal: [2000, 0.85], hd: [3000, 0.9], maxima: [99999, 0.94] };
-const DEF = { q: "hd", filter: "magic", sharp: true, auto: false };
+const DEF = { q: "hd", filter: "magic", sharp: true, auto: false, review: false };
 let CFG = { ...DEF };
 const S = { docs: [], doc: null, cur: 0, caps: {} };
 
@@ -672,7 +805,7 @@ function ingest(src, onDone) {
     try {
       const tr = (typeof ImageBitmap !== "undefined" && src instanceof ImageBitmap) ? [src] : [];
       const r = await E.call("ingest", { id, src, maxSide: q.side, jq: q.jq }, tr);
-      const p = { id, orig: r.blob, w: r.w, h: r.h, quad: r.quad, rot: 0, filter: CFG.filter, bright: 0, contrast: 0, sig: null, text: "", thumb: null };
+      const p = { id, orig: r.blob, w: r.w, h: r.h, quad: r.quad, rot: 0, filter: CFG.filter, bright: 0, contrast: 0, sig: null, text: "", thumb: null, auto: r.mode || "none" };
       onDone && onDone(p); return p;
     } catch (e) { toast("No se pudo procesar una foto"); return null; }
     finally { ingestPending--; updDone(); }
@@ -736,12 +869,14 @@ $("#bSet").onclick = async () => {
     <div class="field"><span>Filtro al escanear</span><div class="seg" id="stF">${segF}</div></div>
     <label class="sw"><span><b>Nitidez para texto</b><small>Letras más definidas en Limpio, Color y Grises</small></span><input type="checkbox" id="stS" ${CFG.sharp ? "checked" : ""}></label>
     <label class="sw"><span><b>Captura automática</b><small>Toma la foto sola cuando la hoja está quieta</small></span><input type="checkbox" id="stA" ${CFG.auto ? "checked" : ""}></label>
+    <label class="sw"><span><b>Revisar bordes en cada foto</b><small>Muestra el recorte antes de aplicarlo. Si está apagado, la hoja se endereza y recorta sola</small></span><input type="checkbox" id="stR" ${CFG.review ? "checked" : ""}></label>
     ${est ? `<p class="note" style="margin:0">${est}</p>` : ""}
     <div class="rowend"><button class="btn pri" data-ok>Listo</button></div>`, (el, close) => {
     el.querySelectorAll("#stQ button").forEach(b => b.onclick = () => { CFG.q = b.dataset.v; el.querySelectorAll("#stQ button").forEach(x => x.setAttribute("aria-pressed", x === b)); el.querySelector("#stQd").textContent = QCAP[CFG.q].desc; saveCfg(); });
     el.querySelectorAll("#stF button").forEach(b => b.onclick = () => { CFG.filter = b.dataset.v; el.querySelectorAll("#stF button").forEach(x => x.setAttribute("aria-pressed", x === b)); saveCfg(); });
     el.querySelector("#stS").onchange = e => { CFG.sharp = e.target.checked; saveCfg(); };
     el.querySelector("#stA").onchange = e => { CFG.auto = e.target.checked; saveCfg(); };
+    el.querySelector("#stR").onchange = e => { CFG.review = e.target.checked; saveCfg(); };
     el.querySelector("[data-ok]").onclick = close;
   });
 };
@@ -887,9 +1022,13 @@ async function camFinish() {
   if (ingestPending) { $("#camDone").disabled = true; }
   await ingestQ;
   if (!cam.added.length) { if (S.doc && S.doc.pages.length) openEditor(Math.min(S.cur, S.doc.pages.length - 1)); else { S.doc = null; show("#v-lib"); } return; }
-  const first = S.doc.pages.indexOf(cam.added[0]), single = cam.added.length === 1;
-  saveDoc(S.doc); cam.added.forEach(p => queueThumb(p));
-  if (single) { openEditor(first, true); openCrop(cam.added[0]); } else openEditor(first);
+  const first = S.doc.pages.indexOf(cam.added[0]), single = cam.added.length === 1, added = cam.added;
+  saveDoc(S.doc); added.forEach(p => queueThumb(p));
+  const nd = added.filter(p => p.auto === "doc").length, nk = added.filter(p => p.auto === "deskew").length, nn = added.length - nd - nk;
+  if (single && (CFG.review || added[0].auto === "none")) { openEditor(first, true); openCrop(added[0]); if (added[0].auto === "none") toast("No encontré los bordes de la hoja. Muévelos a las esquinas y toca Aplicar."); return; }
+  openEditor(first);
+  if (single) toast(added[0].auto === "doc" ? "Listo: enderecé la hoja y recorté el fondo" : "Listo: enderecé la página");
+  else toast(`${nd + nk} de ${added.length} hojas enderezadas y recortadas` + (nn ? `. Revisa ${nn === 1 ? "la otra" : "las otras " + nn} con Recortar` : ""));
 }
 $("#camAuto").onclick = () => { CFG.auto = !CFG.auto; saveCfg(); hint(); setRing(0); cam.stable = 0; };
 $("#camQ").onclick = async () => {
@@ -1313,7 +1452,7 @@ $("#camGallery").onclick = () => $("#fImp").click();
 $("#fCam").addEventListener("change", async e => { const f = e.target.files; await filesToPages(f); e.target.value = ""; if (cam.shots) camFinish(); });
 $("#fImp").addEventListener("change", async e => {
   const f = e.target.files, inCam = !$("#v-cam").hidden;
-  if (!S.doc) S.doc = newDoc();
+  if (!S.doc) { S.doc = newDoc(); cam.added = []; cam.shots = 0; }
   await filesToPages(f); e.target.value = "";
   if (!inCam && cam.shots) camFinish();
   else if (inCam && cam.shots) camFinish();
