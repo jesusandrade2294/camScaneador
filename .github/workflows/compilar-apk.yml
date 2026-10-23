@@ -19,6 +19,7 @@ jobs:
           gradle-version: '8.11.1'
       - name: Compilar
         run: |
+          base64 -d app/firma.keystore.b64 > app/firma.keystore
           gradle assembleDebug --no-daemon --stacktrace
           cp app/build/outputs/apk/debug/app-debug.apk camScaneador.apk
       - uses: actions/upload-artifact@v4
