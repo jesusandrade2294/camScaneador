@@ -1,0 +1,54 @@
+plugins {
+    id 'com.android.application'
+}
+
+android {
+    namespace 'com.camscaneador.app'
+    compileSdk 34
+
+    defaultConfig {
+        applicationId 'com.camscaneador.app'
+        minSdk 26
+        targetSdk 34
+        versionCode 1
+        versionName '1.0'
+    }
+
+    buildTypes {
+        release {
+            minifyEnabled false
+        }
+    }
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+}
+
+dependencies {
+    implementation 'androidx.webkit:webkit:1.11.0'
+    implementation 'androidx.core:core:1.13.1'
+    // Reconocimiento de texto (OCR) sin internet, modelo incluido en la app
+    implementation 'com.google.mlkit:text-recognition:16.0.1'
+}
+
+// Descarga una sola vez las librerías de PDF y ZIP para que la app funcione sin internet
+def jsLibs = [
+    'jspdf.umd.min.js': 'https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js',
+    'jszip.min.js'    : 'https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js'
+]
+tasks.register('descargarLibreriasJs') {
+    def libDir = file('src/main/assets/lib')
+    outputs.dir(libDir)
+    doLast {
+        libDir.mkdirs()
+        jsLibs.each { name, url ->
+            def f = new File(libDir, name)
+            if (!f.exists() || f.length() == 0) {
+                new URL(url).withInputStream { i -> f.withOutputStream { o -> o << i } }
+            }
+        }
+    }
+}
+preBuild.dependsOn 'descargarLibreriasJs'
