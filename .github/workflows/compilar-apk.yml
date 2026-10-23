@@ -26,3 +26,42 @@ jobs:
         with:
           name: camScaneador-apk
           path: camScaneador.apk
+
+  abracadabra:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.11.1'
+      - name: Preparar codigo y librerias de lectura
+        run: |
+          base64 -d abracadabra.tgz.b64 | tar xz
+          A=abracadabra/app/src/main/assets/lib
+          mkdir -p $A/pdfjs libs
+          cd libs
+          npm pack pdfjs-dist@6.2.108 docx-preview@0.3.6 jszip@3.10.1 xlsx@0.18.5
+          for f in *.tgz; do d="${f%.tgz}"; mkdir -p "$d"; tar xzf "$f" -C "$d"; done
+          cd ..
+          P=libs/pdfjs-dist-6.2.108/package
+          cp $P/legacy/build/pdf.min.mjs $P/legacy/build/pdf.worker.min.mjs $P/LICENSE $A/pdfjs/
+          cp -r $P/cmaps $P/standard_fonts $P/wasm $P/iccs $A/pdfjs/
+          cp libs/docx-preview-0.3.6/package/dist/docx-preview.min.js $A/
+          cp libs/jszip-3.10.1/package/dist/jszip.min.js $A/
+          cp libs/xlsx-0.18.5/package/dist/xlsx.full.min.js $A/
+          for f in pdfjs/pdf.min.mjs pdfjs/pdf.worker.min.mjs docx-preview.min.js jszip.min.js xlsx.full.min.js; do test -s $A/$f || { echo "Falta $f"; exit 1; }; done
+          du -sh $A
+      - name: Compilar Abracadabra
+        working-directory: abracadabra
+        run: |
+          base64 -d ../app/firma.keystore.b64 > app/firma.keystore
+          gradle assembleDebug --no-daemon --stacktrace
+          cp app/build/outputs/apk/debug/app-debug.apk ../Abracadabra.apk
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Abracadabra-apk
+          path: Abracadabra.apk
