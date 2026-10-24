@@ -41,6 +41,9 @@ import java.io.OutputStream;
 public class MainActivity extends Activity {
     private static final int REQ_CAMERA = 10;
     private static final int REQ_FILES = 11;
+    private static final int REQ_PHOTO = 12;
+    private static final int REQ_PHOTO_PERM = 13;
+    private Uri photoUri;
     private static final String HOME = "https://appassets.androidplatform.net/assets/index.html";
 
     private WebView web;
@@ -108,6 +111,15 @@ public class MainActivity extends Activity {
             public boolean onShowFileChooser(WebView view, ValueCallback<Uri[]> callback, FileChooserParams params) {
                 if (fileCb != null) fileCb.onReceiveValue(null);
                 fileCb = callback;
+                if (params.isCaptureEnabled()) {
+                    // Foto con la app de cámara del teléfono (su propio autoenfoque)
+                    if (checkSelfPermission(Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED) {
+                        if (launchPhoneCamera()) return true;
+                    } else {
+                        requestPermissions(new String[]{Manifest.permission.CAMERA}, REQ_PHOTO_PERM);
+                        return true;
+                    }
+                }
                 Intent i = new Intent(Intent.ACTION_GET_CONTENT);
                 i.addCategory(Intent.CATEGORY_OPENABLE);
                 i.setType("image/*");
@@ -128,9 +140,34 @@ public class MainActivity extends Activity {
         web.loadUrl(HOME);
     }
 
+    /** Abre la app de cámara del teléfono y guarda la foto en un archivo propio. */
+    private boolean launchPhoneCamera() {
+        try {
+            File dir = new File(getCacheDir(), "fotos");
+            if (!dir.exists()) dir.mkdirs();
+            File[] old = dir.listFiles();
+            if (old != null) for (File f : old) f.delete();
+            File f = File.createTempFile("foto_", ".jpg", dir);
+            photoUri = FileProvider.getUriForFile(this, getPackageName() + ".files", f);
+            Intent i = new Intent(android.provider.MediaStore.ACTION_IMAGE_CAPTURE);
+            i.putExtra(android.provider.MediaStore.EXTRA_OUTPUT, photoUri);
+            i.addFlags(Intent.FLAG_GRANT_WRITE_URI_PERMISSION | Intent.FLAG_GRANT_READ_URI_PERMISSION);
+            startActivityForResult(i, REQ_PHOTO);
+            return true;
+        } catch (Exception e) {
+            photoUri = null;
+            return false;
+        }
+    }
+
     @Override
     public void onRequestPermissionsResult(int requestCode, String[] permissions, int[] grantResults) {
         super.onRequestPermissionsResult(requestCode, permissions, grantResults);
+        if (requestCode == REQ_PHOTO_PERM) {
+            boolean ok = grantResults.length > 0 && grantResults[0] == PackageManager.PERMISSION_GRANTED;
+            if (!(ok && launchPhoneCamera()) && fileCb != null) { fileCb.onReceiveValue(null); fileCb = null; }
+            return;
+        }
         if (requestCode == REQ_CAMERA && pendingPerm != null) {
             if (grantResults.length > 0 && grantResults[0] == PackageManager.PERMISSION_GRANTED) {
                 pendingPerm.grant(new String[]{PermissionRequest.RESOURCE_VIDEO_CAPTURE});
@@ -144,6 +181,13 @@ public class MainActivity extends Activity {
     @Override
     protected void onActivityResult(int requestCode, int resultCode, Intent data) {
         super.onActivityResult(requestCode, resultCode, data);
+        if (requestCode == REQ_PHOTO) {
+            if (fileCb != null) {
+                fileCb.onReceiveValue(resultCode == RESULT_OK && photoUri != null ? new Uri[]{photoUri} : null);
+                fileCb = null;
+            }
+            return;
+        }
         if (requestCode != REQ_FILES || fileCb == null) return;
         Uri[] out = null;
         if (resultCode == RESULT_OK && data != null) {
