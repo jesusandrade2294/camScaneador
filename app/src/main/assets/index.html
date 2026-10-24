@@ -78,6 +78,8 @@ svg.i{width:22px;height:22px;flex:none;stroke:currentColor;fill:none;stroke-widt
 #camOverlay{position:absolute;pointer-events:none}
 .flash{position:absolute;inset:0;background:#fff;opacity:0;pointer-events:none}
 .flash.on{animation:fl .22s ease-out}
+.fring{position:absolute;width:74px;height:74px;margin:-37px 0 0 -37px;border:2px solid var(--frame);border-radius:50%;pointer-events:none;animation:fr .9s ease-out forwards}
+@keyframes fr{0%{transform:scale(1.4);opacity:0}20%{transform:scale(1);opacity:1}80%{opacity:1}100%{opacity:0}}
 @keyframes fl{from{opacity:.75}to{opacity:0}}
 .camctl{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:16px max(20px,env(safe-area-inset-right,0px)) 18px max(20px,env(safe-area-inset-left,0px))}
 .shutter{width:76px;height:76px;border-radius:50%;border:4px solid var(--stage-ink);background:transparent;padding:5px;position:relative}
@@ -189,11 +191,14 @@ svg.i{width:22px;height:22px;flex:none;stroke:currentColor;fill:none;stroke-widt
     <button class="tg" id="camAuto" aria-pressed="false">Auto</button>
     <button class="tg" id="camQ" aria-label="Calidad de foto">HD</button>
     <button class="ib" id="camTorch" aria-pressed="false" aria-label="Linterna" hidden><svg class="i" viewBox="0 0 24 24"><path d="M13 2 4 14h7l-1 8 9-12h-7z"/></svg></button>
+    <button class="ib" id="camLens" aria-label="Cambiar de lente" hidden><svg class="i" viewBox="0 0 24 24"><circle cx="12" cy="12" r="4"/><path d="M20 12a8 8 0 0 1-13.7 5.7M4 12a8 8 0 0 1 13.7-5.7M17 3v3.5h-3.5M7 21v-3.5h3.5"/></svg></button>
+    <button class="ib" id="camPhone" aria-label="Usar la cámara del teléfono"><svg class="i" viewBox="0 0 24 24"><path d="M3 8a2 2 0 0 1 2-2h2l2-2h6l2 2h2a2 2 0 0 1 2 2v10a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/><circle cx="12" cy="13" r="3.5"/><path d="M19 3v4M17 5h4"/></svg></button>
   </div>
   <div class="stagebox" id="camBox">
     <video id="video" playsinline muted autoplay></video>
     <canvas id="camOverlay"></canvas>
     <div class="flash" id="flash"></div>
+    <div class="fring" id="fring" hidden></div>
     <div class="camfail" id="camFail" hidden>
       <svg class="i" viewBox="0 0 24 24" style="width:44px;height:44px"><path d="M3 8a2 2 0 0 1 2-2h2l2-2h6l2 2h2a2 2 0 0 1 2 2v10a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/><circle cx="12" cy="13" r="4"/></svg>
       <p>La vista en vivo no está disponible aquí. Usa la cámara de tu teléfono: cada foto se recorta y mejora automáticamente, a la resolución completa de la cámara.</p>
@@ -694,7 +699,7 @@ const QCAP = {
   maxima: { side: 4800, jq: 0.95, label: "Máxima", short: "Máx", desc: "Resolución completa de la cámara (hasta 17 MP)" }
 };
 const QEXP = { liviana: [1400, 0.72], normal: [2000, 0.85], hd: [3000, 0.9], maxima: [99999, 0.94] };
-const DEF = { q: "hd", filter: "magic", sharp: true, auto: false, review: false };
+const DEF = { q: "hd", filter: "magic", sharp: true, auto: false, review: false, camId: null };
 let CFG = { ...DEF };
 const S = { docs: [], doc: null, cur: 0, caps: {} };
 
@@ -820,9 +825,9 @@ function markDirty(p, delay = 500) {
   clearTimeout(thumbTimers[p.id]);
   thumbTimers[p.id] = setTimeout(() => queueThumb(p, true), delay);
 }
-function queueThumb(p, force) {
+function queueThumb(p, force, forDoc) {
   if (p._tq || (p.thumb && !force)) return; p._tq = true;
-  const doc = S.doc;
+  const doc = forDoc || S.doc;
   thumbQ = thumbQ.then(async () => {
     p._tq = false;
     try {
@@ -901,22 +906,72 @@ async function deleteDoc(d) { S.docs = S.docs.filter(x => x !== d); await idbDo(
 function newDoc() { return { id: uid(), name: defName(), created: Date.now(), updated: Date.now(), pages: [], thumb: "" }; }
 
 /* ================= Cámara ================= */
-const cam = { caps: new Set(), stream: null, track: null, ic: null, raf: 0, busy: false, lastDet: 0, quad: null, target: null, prevT: null, lastSeen: 0, stable: 0, needMove: false, capturing: false, shots: 0, added: [], alpha: 0, detC: null };
+const cam = { caps: new Set(), sharp: [], capsAll: null, backs: [], focusT: 0, shC: null, stream: null, track: null, ic: null, raf: 0, busy: false, lastDet: 0, quad: null, target: null, prevT: null, lastSeen: 0, stable: 0, needMove: false, capturing: false, shots: 0, added: [], alpha: 0, detC: null };
 function updDone() {
   const b = $("#camDone"); if (!b) return;
   b.disabled = cam.shots === 0;
   b.textContent = ingestPending > 0 ? `Procesando ${ingestPending}…` : "Listo";
 }
-async function startStream() {
+/* ---- Cámara: lente principal con autoenfoque, enfoque continuo y toque para enfocar ---- */
+const camNum = l => { const m = /(\d+)/.exec(l || ""); return m ? +m[1] : 99; };
+async function backCameras() {
+  let ds = []; try { ds = (await navigator.mediaDevices.enumerateDevices()).filter(d => d.kind === "videoinput"); } catch (e) {}
+  const back = ds.filter(d => /back|rear|environment|trase/i.test(d.label));
+  return (back.length ? back : ds).sort((a, b) => camNum(a.label) - camNum(b.label));
+}
+function trackCaps(t) { try { return t.getCapabilities ? t.getCapabilities() : {}; } catch (e) { return {}; } }
+const hasAF = c => !!(c.focusMode && (c.focusMode.includes("continuous") || c.focusMode.includes("single-shot")));
+async function openTrack(deviceId) {
   const hiFrame = CFG.q !== "estandar" && !("ImageCapture" in window);
   const size = hiFrame ? { width: { ideal: 3840 }, height: { ideal: 2880 } } : { width: { ideal: 1920 }, height: { ideal: 1440 } };
-  cam.stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: { ideal: "environment" }, ...size, aspectRatio: { ideal: 4 / 3 } }, audio: false });
-  cam.track = cam.stream.getVideoTracks()[0];
+  const video = deviceId ? { deviceId: { exact: deviceId }, ...size, aspectRatio: { ideal: 4 / 3 } } : { facingMode: { ideal: "environment" }, ...size, aspectRatio: { ideal: 4 / 3 } };
+  return navigator.mediaDevices.getUserMedia({ video, audio: false });
+}
+async function startStream(forceId) {
+  let stream = null, id = forceId || CFG.camId || null;
+  if (id) { try { stream = await openTrack(id); } catch (e) { stream = null; if (!forceId) { CFG.camId = null; } } }
+  if (!stream) {
+    stream = await openTrack(null);
+    /* Si la cámara que entregó el sistema no tiene autoenfoque (suele ser el gran angular), busca la principal */
+    if (!hasAF(trackCaps(stream.getVideoTracks()[0]))) {
+      const list = await backCameras(), curId = stream.getVideoTracks()[0].getSettings().deviceId;
+      let found = null;
+      if (list.length > 1) {
+        stream.getTracks().forEach(t => t.stop());
+        for (const d of list.slice(0, 5)) {
+          if (d.deviceId === curId) continue;
+          try { const s2 = await openTrack(d.deviceId); if (hasAF(trackCaps(s2.getVideoTracks()[0]))) { found = s2; break; } s2.getTracks().forEach(t => t.stop()); } catch (e) {}
+        }
+        if (!found) found = await openTrack(curId).catch(() => openTrack(null));
+        stream = found;
+      }
+    }
+    try { const sid = stream.getVideoTracks()[0].getSettings().deviceId; if (sid) { CFG.camId = sid; saveCfg(); } } catch (e) {}
+  }
+  cam.stream = stream; cam.track = stream.getVideoTracks()[0];
   const v = $("#video"); v.srcObject = cam.stream; await v.play().catch(() => {});
-  let caps = {}; try { caps = cam.track.getCapabilities ? cam.track.getCapabilities() : {}; } catch (e) {}
-  if (caps.focusMode && caps.focusMode.includes("continuous")) cam.track.applyConstraints({ advanced: [{ focusMode: "continuous" }] }).catch(() => {});
+  const caps = cam.capsAll = trackCaps(cam.track);
+  await focusContinuous();
   $("#camTorch").hidden = !caps.torch; $("#camTorch").setAttribute("aria-pressed", "false");
   cam.ic = null; if ("ImageCapture" in window) { try { cam.ic = new ImageCapture(cam.track); } catch (e) {} }
+  cam.sharp = []; 
+  const backs = await backCameras(); cam.backs = backs; $("#camLens").hidden = backs.length < 2;
+}
+async function focusContinuous() {
+  const c = cam.capsAll || {}; if (!cam.track) return;
+  const adv = {};
+  if (c.focusMode && c.focusMode.includes("continuous")) adv.focusMode = "continuous";
+  if (c.exposureMode && c.exposureMode.includes("continuous")) adv.exposureMode = "continuous";
+  if (c.whiteBalanceMode && c.whiteBalanceMode.includes("continuous")) adv.whiteBalanceMode = "continuous";
+  if (Object.keys(adv).length) { try { await cam.track.applyConstraints({ advanced: [adv] }); } catch (e) {} }
+}
+async function focusAt(x, y) {
+  const c = cam.capsAll || {}; if (!cam.track || !hasAF(c)) return false;
+  const adv = { pointsOfInterest: [{ x: clamp(x, 0, 1), y: clamp(y, 0, 1) }] };
+  adv.focusMode = c.focusMode.includes("single-shot") ? "single-shot" : "continuous";
+  try { await cam.track.applyConstraints({ advanced: [adv] }); } catch (e) { try { await cam.track.applyConstraints({ advanced: [{ focusMode: adv.focusMode }] }); } catch (e2) { return false; } }
+  clearTimeout(cam.focusT); cam.focusT = setTimeout(focusContinuous, 2500);
+  return true;
 }
 async function openCam(doc) {
   S.doc = doc; cam.added = []; cam.shots = 0; $("#shotCount").hidden = true; $("#lastShot").style.backgroundImage = ""; updDone();
@@ -936,7 +991,7 @@ function stopCam() {
   cam.stream = cam.track = cam.ic = null;
   const o = $("#camOverlay"); o.getContext("2d").clearRect(0, 0, o.width, o.height);
 }
-function hint(t) { $("#camHint").textContent = t || (CFG.auto ? "Captura automática: mantén la hoja quieta dentro del marco." : "Coloca la hoja sobre un fondo oscuro. El marco amarillo muestra los bordes."); }
+function hint(t) { $("#camHint").textContent = t || (CFG.auto ? "Captura automática: mantén la hoja quieta dentro del marco." : "Toca la hoja para enfocar. Aléjate unos 25 cm si se ve borrosa."); }
 function videoRect() {
   const v = $("#video"), box = $("#camBox").getBoundingClientRect(), vw = v.videoWidth, vh = v.videoHeight; if (!vw) return null;
   const s = Math.min(box.width / vw, box.height / vh), w = vw * s, h = vh * s; return { x: (box.width - w) / 2, y: (box.height - h) / 2, w, h, s };
@@ -950,11 +1005,34 @@ function camLoop(now) {
     const vw = v.videoWidth, vh = v.videoHeight, sc = 320 / Math.max(vw, vh), w = Math.round(vw * sc), h = Math.round(vh * sc);
     if (!cam.detC || cam.detC.width !== w || cam.detC.height !== h) cam.detC = cv(w, h);
     const x = cam.detC.getContext("2d", { willReadFrequently: true }); x.drawImage(v, 0, 0, w, h);
+    measureSharp(v, now);
     const id = x.getImageData(0, 0, w, h);
     E.call("detectFrame", { data: id.data, w, h }, [id.data.buffer]).then(q => onDetect(q ? q.map(([a, b]) => [a / sc, b / sc]) : null, vw, vh, performance.now()), () => {}).finally(() => { cam.busy = false; });
   }
   drawOverlay(now);
   cam.raf = requestAnimationFrame(camLoop);
+}
+/* Nitidez = varianza del laplaciano en el centro de la imagen, a resolución real del video */
+function sharpnessOf(d, w, h) {
+  let s = 0, s2 = 0, n = 0;
+  for (let y = 1; y < h - 1; y += 1) for (let x = 1; x < w - 1; x += 1) {
+    const i = (y * w + x) * 4, g = k => d[k] * 0.3 + d[k + 1] * 0.59 + d[k + 2] * 0.11;
+    const L = 4 * g(i) - g(i - 4) - g(i + 4) - g(i - w * 4) - g(i + w * 4); s += L; s2 += L * L; n++;
+  }
+  const m = s / n; return s2 / n - m * m;
+}
+function measureSharp(v, now) {
+  const vw = v.videoWidth, vh = v.videoHeight, S = Math.min(240, vw >> 1, vh >> 1);
+  if (!cam.shC) cam.shC = cv(S, S);
+  const x = cam.shC.getContext("2d", { willReadFrequently: true }); x.drawImage(v, (vw - S) / 2, (vh - S) / 2, S, S, 0, 0, S, S);
+  const val = sharpnessOf(x.getImageData(0, 0, S, S).data, S, S);
+  cam.sharp.push([now, val]); while (cam.sharp.length && now - cam.sharp[0][0] > 2500) cam.sharp.shift();
+}
+function sharpRatio() { const a = cam.sharp; if (!a || a.length < 3) return 1; const cur = a[a.length - 1][1]; let mx = 0; for (const p of a) if (p[1] > mx) mx = p[1]; return mx ? cur / mx : 1; }
+async function waitSharp(maxMs) {
+  const t0 = performance.now();
+  while (performance.now() - t0 < maxMs) { if (sharpRatio() >= 0.88) return true; await new Promise(r => setTimeout(r, 60)); }
+  return false;
 }
 function onDetect(q, vw, vh, now) {
   const diag = Math.hypot(vw, vh);
@@ -965,7 +1043,7 @@ function onDetect(q, vw, vh, now) {
     if (d > 0.08) cam.needMove = false;
     cam.prevT = q; cam.target = q;
   } else { cam.target = null; cam.prevT = null; cam.stable = 0; cam.needMove = false; }
-  if (CFG.auto && !cam.capturing && !cam.needMove && cam.stable) {
+  if (CFG.auto && !cam.capturing && !cam.needMove && cam.stable && sharpRatio() >= 0.85) {
     const f = (now - cam.stable) / 1100; setRing(f);
     if (f >= 1) { cam.needMove = true; cam.stable = 0; setRing(0); capture(); }
   } else setRing(0);
@@ -1000,10 +1078,19 @@ async function capture() {
   const t = cv(120, Math.round(120 * v.videoHeight / v.videoWidth)); t.getContext("2d").drawImage(v, 0, 0, t.width, t.height);
   $("#lastShot").style.backgroundImage = `url("${t.toDataURL("image/jpeg", 0.6)}")`;
   cam.shots++; $("#shotCount").hidden = false; $("#shotCount").textContent = cam.shots;
-  if (cam.ic && CFG.q !== "estandar") hint("Tomando foto en " + QCAP[CFG.q].label + "…");
   const job = (async () => {
     let src;
-    try { src = await grabStill(); } finally { cam.capturing = false; hint(); }
+    try {
+      const c = cam.capsAll || {};
+      if (hasAF(c) && c.focusMode.includes("single-shot")) {
+        const q = cam.target, vw2 = v.videoWidth, vh2 = v.videoHeight;
+        const fx = q ? q.reduce((a, p) => a + p[0], 0) / 4 / vw2 : 0.5, fy = q ? q.reduce((a, p) => a + p[1], 0) / 4 / vh2 : 0.5;
+        await focusAt(fx, fy); cam.sharp = []; await new Promise(r => setTimeout(r, 250));
+      }
+      if (sharpRatio() < 0.88) { hint("Enfocando…"); await waitSharp(1400); }
+      if (cam.ic && CFG.q !== "estandar") hint("Tomando foto en " + QCAP[CFG.q].label + "…");
+      src = await grabStill();
+    } finally { cam.capturing = false; hint(); }
     ingest(src, p => { S.doc.pages.push(p); cam.added.push(p); });
     updDone();
   })();
@@ -1036,6 +1123,20 @@ $("#camQ").onclick = async () => {
   toast(`Calidad: ${QCAP[CFG.q].label} · ${QCAP[CFG.q].desc}`);
   if (cam.stream && !("ImageCapture" in window)) { try { cam.stream.getTracks().forEach(t => t.stop()); await startStream(); } catch (e) {} }
 };
+$("#camBox").addEventListener("click", async e => {
+  if (!cam.stream || e.target.closest("button")) return;
+  const r = videoRect(); if (!r) return; const box = $("#camBox").getBoundingClientRect();
+  const x = (e.clientX - box.left - r.x) / r.w, y = (e.clientY - box.top - r.y) / r.h; if (x < 0 || y < 0 || x > 1 || y > 1) return;
+  const f = $("#fring"); f.hidden = false; f.style.left = (e.clientX - box.left) + "px"; f.style.top = (e.clientY - box.top) + "px"; f.style.animation = "none"; void f.offsetWidth; f.style.animation = "";
+  const ok = await focusAt(x, y); if (!ok) hint("Esta cámara no permite elegir el punto de enfoque. Prueba el botón de la cámara del teléfono.");
+});
+$("#camLens").onclick = async () => {
+  const list = cam.backs || []; if (list.length < 2) return;
+  const cur = cam.track && cam.track.getSettings().deviceId, i = list.findIndex(d => d.deviceId === cur), next = list[(i + 1) % list.length];
+  try { cam.stream.getTracks().forEach(t => t.stop()); await startStream(next.deviceId); CFG.camId = next.deviceId; saveCfg(); toast(`Lente ${((i + 1) % list.length) + 1} de ${list.length}` + (hasAF(cam.capsAll || {}) ? " · con autoenfoque" : " · sin autoenfoque")); }
+  catch (e) { toast("No se pudo cambiar de lente"); try { await startStream(); } catch (e2) {} }
+};
+$("#camPhone").onclick = () => $("#fCam").click();
 $("#camTorch").onclick = async () => {
   const on = $("#camTorch").getAttribute("aria-pressed") !== "true";
   try { await cam.track.applyConstraints({ advanced: [{ torch: on }] }); $("#camTorch").setAttribute("aria-pressed", on); } catch (e) { toast("La linterna no está disponible"); }
@@ -1503,7 +1604,7 @@ async function init() {
     try {
       const d = newDoc(); d.name = "Ejemplo · acta de materiales";
       const src = await toBlob(makeSample(), "image/jpeg", 0.95);
-      const p = await ingest(src); if (p) { d.pages.push(p); S.doc = d; queueThumb(p); await thumbQ; S.doc = null; await saveDoc(d, true); await kvSet("ejemplo", 1); }
+      const p = await ingest(src); if (p) { d.pages.push(p); queueThumb(p, false, d); await thumbQ; await saveDoc(d, true); await kvSet("ejemplo", 1); }
     } catch (e) {}
     renderLib();
   }
