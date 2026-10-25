@@ -65,3 +65,43 @@ jobs:
         with:
           name: Abracadabra-apk
           path: Abracadabra.apk
+
+  escaneitor:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.11.1'
+      - name: Preparar codigo y librerias de Escaneitor
+        run: |
+          base64 -d escaneitor.tgz.b64 | tar xz
+          A=escaneitor/app/src/main/assets/lib
+          mkdir -p $A/pdfjs $A/fonts libs
+          cd libs
+          npm pack pdfjs-dist@6.2.108 pdf-lib@1.17.1
+          npm pack @fontsource/dancing-script@5 @fontsource/great-vibes@5 || echo "sin fuentes de firma"
+          for f in *.tgz; do d="${f%.tgz}"; mkdir -p "$d"; tar xzf "$f" -C "$d"; done
+          cd ..
+          P=libs/pdfjs-dist-6.2.108/package
+          cp $P/legacy/build/pdf.min.mjs $P/legacy/build/pdf.worker.min.mjs $P/LICENSE $A/pdfjs/
+          cp -r $P/cmaps $P/standard_fonts $P/wasm $P/iccs $A/pdfjs/
+          cp libs/pdf-lib-1.17.1/package/dist/pdf-lib.min.js $A/
+          F1=$(ls libs/fontsource-dancing-script-*/package/files/dancing-script-latin-400-normal.woff2 2>/dev/null | head -1); if [ -n "$F1" ]; then cp "$F1" $A/fonts/firma1.woff2; fi
+          F2=$(ls libs/fontsource-great-vibes-*/package/files/great-vibes-latin-400-normal.woff2 2>/dev/null | head -1); if [ -n "$F2" ]; then cp "$F2" $A/fonts/firma2.woff2; fi
+          for f in pdf-lib.min.js pdfjs/pdf.min.mjs pdfjs/pdf.worker.min.mjs; do test -s $A/$f || { echo "Falta $f"; exit 1; }; done
+          ls -la $A $A/fonts
+      - name: Compilar Escaneitor
+        working-directory: escaneitor
+        run: |
+          base64 -d ../app/firma.keystore.b64 > app/firma.keystore
+          gradle assembleDebug --no-daemon --stacktrace
+          cp app/build/outputs/apk/debug/app-debug.apk ../Escaneitor.apk
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Escaneitor-apk
+          path: Escaneitor.apk
