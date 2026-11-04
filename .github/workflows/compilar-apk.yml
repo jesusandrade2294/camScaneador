@@ -118,17 +118,17 @@ jobs:
       - uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: '8.11.1'
-      - name: Compilar Entrenaitor
+      - name: Compilar Power up
         run: |
           base64 -d entrenaitor.tgz.b64 | tar xz
           cd entrenaitor
           base64 -d ../app/firma.keystore.b64 > app/firma.keystore
           gradle assembleDebug --no-daemon --stacktrace
-          cp app/build/outputs/apk/debug/app-debug.apk ../Entrenaitor.apk
+          cp app/build/outputs/apk/debug/app-debug.apk ../PowerUp.apk
       - uses: actions/upload-artifact@v4
         with:
-          name: Entrenaitor-apk
-          path: Entrenaitor.apk
+          name: PowerUp-apk
+          path: PowerUp.apk
 
   dictaitor:
     runs-on: ubuntu-24.04
