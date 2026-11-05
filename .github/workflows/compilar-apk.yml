@@ -164,14 +164,14 @@ jobs:
       - uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: '8.11.1'
-      - name: Compilar Ahorraitor
+      - name: Compilar BOSS Finanzas
         run: |
           base64 -d ahorraitor.tgz.b64 | tar xz
           cd ahorraitor
           base64 -d ../app/firma.keystore.b64 > app/firma.keystore
           gradle assembleDebug --no-daemon --stacktrace
-          cp app/build/outputs/apk/debug/app-debug.apk ../Ahorraitor.apk
+          cp app/build/outputs/apk/debug/app-debug.apk ../BossFinanzas.apk
       - uses: actions/upload-artifact@v4
         with:
-          name: Ahorraitor-apk
-          path: Ahorraitor.apk
+          name: BossFinanzas-apk
+          path: BossFinanzas.apk
